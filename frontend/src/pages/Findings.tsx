@@ -14,6 +14,7 @@ type Finding = {
   discovered_at: string
   cvss?: number
   cve?: string
+  plugin_id?: string
 }
 
 type FindingStatus = 'new' | 'reviewed' | 'suppressed'
@@ -92,7 +93,7 @@ export default function Findings() {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterSeverity, setFilterSeverity] = useState('all')
   const [filterTarget, setFilterTarget] = useState('all')
-  const [filterCategory, setFilterCategory] = useState('all')
+  const [filterScanner, setFilterScanner] = useState('all')
   const [sortMode, setSortMode] = useState<SortMode>('severity')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
@@ -153,19 +154,30 @@ export default function Findings() {
     return Array.from(seen).sort()
   }, [enrichedFindings])
 
+  // plugin_id values serve as the "scanner/tool" filter per issue #43
+  const uniqueScanners = useMemo(() => {
+    const seen = new Set<string>()
+    for (const f of enrichedFindings) {
+      if (f.plugin_id) seen.add(f.plugin_id)
+    }
+    return Array.from(seen).sort()
+  }, [enrichedFindings])
+
   const filteredFindings = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
 
-    // Parse date boundaries once so we don't redo it per finding
-    const fromMs = dateFrom ? new Date(dateFrom).getTime() : null
-    const toMs = dateTo ? new Date(dateTo + 'T23:59:59').getTime() : null
+    // Use the same date parsing the UI uses so timezone handling stays consistent
+    const fromDate = dateFrom ? parseDateSafe(dateFrom + 'T00:00:00') : null
+    const toDate = dateTo ? parseDateSafe(dateTo + 'T23:59:59') : null
+    const fromMs = fromDate?.getTime() ?? null
+    const toMs = toDate?.getTime() ?? null
 
     return enrichedFindings.filter((finding) => {
       const matchesSeverity = filterSeverity === 'all' || finding.severity === filterSeverity
       const matchesTarget = filterTarget === 'all' || finding.target === filterTarget
-      const matchesCategory = filterCategory === 'all' || finding.category === filterCategory
+      const matchesScanner = filterScanner === 'all' || finding.plugin_id === filterScanner
 
-      // Date range check
+      // Date range check — uses parseDateSafe so we respect the app's timezone config
       if (fromMs || toMs) {
         const ts = parseDateSafe(finding.discovered_at)?.getTime()
         if (!ts) return false
@@ -185,9 +197,9 @@ export default function Findings() {
         .join(' ')
         .toLowerCase()
 
-      return matchesSeverity && matchesTarget && matchesCategory && haystack.includes(query)
+      return matchesSeverity && matchesTarget && matchesScanner && haystack.includes(query)
     })
-  }, [enrichedFindings, filterSeverity, filterTarget, filterCategory, searchQuery, dateFrom, dateTo])
+  }, [enrichedFindings, filterSeverity, filterTarget, filterScanner, searchQuery, dateFrom, dateTo])
 
   const sortedFindings = useMemo(() => {
     const items = [...filteredFindings]
@@ -386,8 +398,9 @@ export default function Findings() {
 
         <section className="sticky top-4 z-20 border-2 border-black bg-charcoal/95 p-4 shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] backdrop-blur">
           <div className="flex flex-col gap-4">
-            <div className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1.8fr)]">
-              <div className="space-y-2">
+            {/* Row 1: search + severity quick-toggles */}
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+              <div className="space-y-2 xl:flex-1">
                 <label className="text-[10px] font-black uppercase tracking-[0.2em] text-silver-bright">Search</label>
                 <input
                   type="text"
@@ -398,33 +411,34 @@ export default function Findings() {
                 />
               </div>
 
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-[0.2em] text-silver-bright">Severity</label>
-                <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFilterSeverity('all')}
+                  className={`border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition-all ${filterPillClasses(filterSeverity === 'all')}`}
+                >
+                  All
+                </button>
+                {severityOrder.map((severity) => (
                   <button
+                    key={severity}
                     type="button"
-                    onClick={() => setFilterSeverity('all')}
-                    className={`border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition-all ${filterPillClasses(filterSeverity === 'all')}`}
+                    onClick={() => setFilterSeverity((current) => (current === severity ? 'all' : severity))}
+                    className={`border px-3 py-2 text-[10px] font-black uppercase tracking-[0.18em] transition-all ${
+                      filterSeverity === severity
+                        ? `${severityConfig[severity].chip} border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]`
+                        : 'border-silver-bright/10 bg-charcoal-dark text-silver/65 hover:border-silver-bright/30'
+                    }`}
                   >
-                    All Levels
+                    {severityConfig[severity].label} {countsBySeverity[severity] || 0}
                   </button>
-                  {['critical', 'high', 'medium'].map((severity) => (
-                    <button
-                      key={severity}
-                      type="button"
-                      onClick={() => setFilterSeverity(severity)}
-                      className={`border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition-all ${filterPillClasses(filterSeverity === severity)}`}
-                    >
-                      {severityConfig[severity].label} {countsBySeverity[severity] || 0}
-                    </button>
-                  ))}
-                </div>
+                ))}
               </div>
             </div>
 
-            {/* Second row: target, category, sort + severity quick-toggles */}
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {/* Row 2: target, scanner, sort, date range, reset */}
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-end">
+              <div className="grid flex-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="space-y-2">
                   <label className="text-[10px] font-black uppercase tracking-[0.2em] text-silver-bright">Target</label>
                   <select
@@ -440,15 +454,15 @@ export default function Findings() {
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-[0.2em] text-silver-bright">Category</label>
+                  <label className="text-[10px] font-black uppercase tracking-[0.2em] text-silver-bright">Scanner / Tool</label>
                   <select
-                    value={filterCategory}
-                    onChange={(e) => setFilterCategory(e.target.value)}
+                    value={filterScanner}
+                    onChange={(e) => setFilterScanner(e.target.value)}
                     className="w-full border-2 border-silver-bright/10 bg-charcoal-dark px-3 py-2.5 text-xs font-mono text-silver-bright focus:border-rag-red focus:outline-none"
                   >
-                    <option value="all">All Categories</option>
-                    {uniqueCategories.map((c) => (
-                      <option key={c} value={c}>{c}</option>
+                    <option value="all">All Scanners</option>
+                    {uniqueScanners.map((s) => (
+                      <option key={s} value={s}>{s}</option>
                     ))}
                   </select>
                 </div>
@@ -473,7 +487,7 @@ export default function Findings() {
                     type="date"
                     value={dateFrom}
                     onChange={(e) => setDateFrom(e.target.value)}
-                    className="w-full border-2 border-silver-bright/10 bg-charcoal-dark px-3 py-2 text-xs font-mono text-silver-bright focus:border-rag-red focus:outline-none"
+                    className="w-full border-2 border-silver-bright/10 bg-charcoal-dark px-3 py-2 text-xs font-mono text-silver-bright [color-scheme:dark] focus:border-rag-red focus:outline-none"
                   />
                 </div>
 
@@ -483,27 +497,26 @@ export default function Findings() {
                     type="date"
                     value={dateTo}
                     onChange={(e) => setDateTo(e.target.value)}
-                    className="w-full border-2 border-silver-bright/10 bg-charcoal-dark px-3 py-2 text-xs font-mono text-silver-bright focus:border-rag-red focus:outline-none"
+                    className="w-full border-2 border-silver-bright/10 bg-charcoal-dark px-3 py-2 text-xs font-mono text-silver-bright [color-scheme:dark] focus:border-rag-red focus:outline-none"
                   />
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2">
-                {severityOrder.map((severity) => (
-                  <button
-                    key={severity}
-                    type="button"
-                    onClick={() => setFilterSeverity((current) => (current === severity ? 'all' : severity))}
-                    className={`border px-3 py-2 text-[10px] font-black uppercase tracking-[0.18em] transition-all ${
-                      filterSeverity === severity
-                        ? `${severityConfig[severity].chip} border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]`
-                        : 'border-silver-bright/10 bg-charcoal-dark text-silver/65 hover:border-silver-bright/30'
-                    }`}
-                  >
-                    {severityConfig[severity].label} {countsBySeverity[severity] || 0}
-                  </button>
-                ))}
-              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterSeverity('all')
+                  setFilterTarget('all')
+                  setFilterScanner('all')
+                  setSortMode('severity')
+                  setDateFrom('')
+                  setDateTo('')
+                  setSearchQuery('')
+                }}
+                className="shrink-0 border border-silver-bright/20 bg-charcoal-dark px-4 py-2.5 text-[10px] font-black uppercase tracking-[0.18em] text-silver/65 transition-all hover:border-rag-red hover:text-silver-bright"
+              >
+                Reset Filters
+              </button>
             </div>
           </div>
         </section>

@@ -9,7 +9,7 @@ vi.mock('../../../src/api', () => ({
   API_BASE: 'http://127.0.0.1:8000',
 }))
 
-// ── Shared fixtures ───────────────────────────────────────────────────────────
+// ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const criticalFinding = {
   id: 'finding-crit-1',
@@ -22,6 +22,7 @@ const criticalFinding = {
   discovered_at: '2026-05-14T10:00:00Z',
   cvss: 9.8,
   cve: 'CVE-2026-1234',
+  plugin_id: 'sqlmap',
 }
 
 const highFinding = {
@@ -34,6 +35,7 @@ const highFinding = {
   remediation: 'Sanitize output.',
   discovered_at: '2026-05-13T08:30:00Z',
   cvss: 7.5,
+  plugin_id: 'zap',
 }
 
 const mediumFinding = {
@@ -45,11 +47,12 @@ const mediumFinding = {
   description: 'Several headers are absent.',
   remediation: 'Add CSP and HSTS headers.',
   discovered_at: '2026-05-15T14:00:00Z',
+  plugin_id: 'nikto',
 }
 
 const allFindings = [criticalFinding, highFinding, mediumFinding]
 
-// ── Helper ────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function renderFindings() {
   return render(
@@ -59,8 +62,26 @@ function renderFindings() {
   )
 }
 
-// Finding titles show up in both the list row and the detail sidebar,
-// so we use getAllByText and check the count instead of getByText.
+/** Wait for data to load by looking for a known finding title. */
+async function waitForLoad() {
+  await waitFor(() => {
+    expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
+  })
+}
+
+/** Helper to grab the sort select via its label. */
+function getSortSelect() {
+  const label = screen.getByText('Sort By')
+  return label.parentElement!.querySelector('select')!
+}
+
+/** Helper to collect visible finding titles from the list section. */
+function getVisibleTitles() {
+  // h3 tags in the list hold finding titles
+  return Array.from(document.querySelectorAll('h3'))
+    .map((el) => el.textContent ?? '')
+    .filter(Boolean)
+}
 
 // ── Loading ───────────────────────────────────────────────────────────────────
 
@@ -81,11 +102,7 @@ describe('Findings — severity filtering', () => {
 
   it('shows all findings by default', async () => {
     renderFindings()
-
-    // Wait for data to load — the first finding title appears in both list + sidebar
-    await waitFor(() => {
-      expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
-    })
+    await waitForLoad()
     expect(screen.getAllByText('Stored XSS in Comments').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('Missing Security Headers').length).toBeGreaterThanOrEqual(1)
   })
@@ -93,12 +110,8 @@ describe('Findings — severity filtering', () => {
   it('filters to critical only when critical pill is clicked', async () => {
     const user = userEvent.setup()
     renderFindings()
+    await waitForLoad()
 
-    await waitFor(() => {
-      expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
-    })
-
-    // Click the "Critical" severity quick-toggle
     const critButtons = screen.getAllByRole('button', { name: /critical/i })
     const toggle = critButtons.find((btn) => btn.textContent?.includes('1'))
     expect(toggle).toBeTruthy()
@@ -111,50 +124,77 @@ describe('Findings — severity filtering', () => {
   })
 })
 
-// ── Sort by newest ────────────────────────────────────────────────────────────
+// ── Sort options ──────────────────────────────────────────────────────────────
 
 describe('Findings — sorting', () => {
   beforeEach(() => {
     vi.mocked(getFindings).mockResolvedValue({ findings: allFindings })
   })
 
-  it('renders a sort dropdown with expected options', async () => {
+  it('sort dropdown contains all expected options', async () => {
     renderFindings()
+    await waitForLoad()
 
-    await waitFor(() => {
-      expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
-    })
-
-    const sortSelect = screen.getByDisplayValue(/Severity/i)
-    expect(sortSelect).toBeInTheDocument()
-
-    const options = within(sortSelect as HTMLElement).getAllByRole('option')
-    const labels = options.map((opt) => opt.textContent)
+    const options = within(getSortSelect()).getAllByRole('option')
+    const labels = options.map((o) => o.textContent)
     expect(labels).toContain('Newest First')
     expect(labels).toContain('Oldest First')
     expect(labels).toContain('Target (A → Z)')
   })
 
-  it('switches to flat list view when sort mode is newest', async () => {
+  it('switches to flat list when sort is newest', async () => {
     renderFindings()
+    await waitForLoad()
+
+    fireEvent.change(getSortSelect(), { target: { value: 'newest' } })
 
     await waitFor(() => {
-      expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
+      const headers = screen.getAllByText(/visible in queue/i)
+      expect(headers.length).toBe(1)
     })
+  })
 
-    // Find the sort select by its label and change to newest
-    const sortLabel = screen.getByText('Sort By')
-    const sortSelect = sortLabel.parentElement!.querySelector('select')!
-    fireEvent.change(sortSelect, { target: { value: 'newest' } })
+  it('newest-first puts most recent finding on top', async () => {
+    renderFindings()
+    await waitForLoad()
 
-    // When sorted by severity, grouped section headers like "Critical" show.
-    // When sorted by newest, severity group headers disappear and a single
-    // flat container is rendered instead.
+    fireEvent.change(getSortSelect(), { target: { value: 'newest' } })
+
     await waitFor(() => {
-      // The severity group headers should not be rendered as section titles
-      const headings = screen.getAllByText(/visible in queue/i)
-      // In severity mode there are multiple (one per group), in flat mode just one
-      expect(headings.length).toBe(1)
+      const titles = getVisibleTitles()
+      // May 15 > May 14 > May 13
+      expect(titles.indexOf('Missing Security Headers')).toBeLessThan(titles.indexOf('SQL Injection in Login'))
+      expect(titles.indexOf('SQL Injection in Login')).toBeLessThan(titles.indexOf('Stored XSS in Comments'))
+    })
+  })
+
+  it('oldest-first puts earliest finding on top', async () => {
+    renderFindings()
+    await waitForLoad()
+
+    fireEvent.change(getSortSelect(), { target: { value: 'oldest' } })
+
+    await waitFor(() => {
+      const titles = getVisibleTitles()
+      // May 13 < May 14 < May 15
+      expect(titles.indexOf('Stored XSS in Comments')).toBeLessThan(titles.indexOf('SQL Injection in Login'))
+      expect(titles.indexOf('SQL Injection in Login')).toBeLessThan(titles.indexOf('Missing Security Headers'))
+    })
+  })
+
+  it('target A-Z sorts alphabetically by target', async () => {
+    renderFindings()
+    await waitForLoad()
+
+    fireEvent.change(getSortSelect(), { target: { value: 'target' } })
+
+    await waitFor(() => {
+      const titles = getVisibleTitles()
+      // api.example.com comes before web.example.com
+      // criticalFinding and mediumFinding share api.example.com, highFinding has web.example.com
+      const webIdx = titles.indexOf('Stored XSS in Comments')
+      const apiIdx = titles.indexOf('SQL Injection in Login')
+      expect(apiIdx).toBeLessThan(webIdx)
     })
   })
 })
@@ -166,16 +206,13 @@ describe('Findings — target filter', () => {
     vi.mocked(getFindings).mockResolvedValue({ findings: allFindings })
   })
 
-  it('renders target dropdown with unique targets', async () => {
+  it('renders unique targets in dropdown', async () => {
     renderFindings()
-
-    await waitFor(() => {
-      expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
-    })
+    await waitForLoad()
 
     const targetSelect = screen.getByDisplayValue(/All Targets/i)
     const options = within(targetSelect as HTMLElement).getAllByRole('option')
-    const labels = options.map((opt) => opt.textContent)
+    const labels = options.map((o) => o.textContent)
 
     expect(labels).toContain('All Targets')
     expect(labels).toContain('api.example.com')
@@ -185,10 +222,7 @@ describe('Findings — target filter', () => {
   it('filters findings when a specific target is selected', async () => {
     const user = userEvent.setup()
     renderFindings()
-
-    await waitFor(() => {
-      expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
-    })
+    await waitForLoad()
 
     const targetSelect = screen.getByDisplayValue(/All Targets/i)
     await user.selectOptions(targetSelect, 'web.example.com')
@@ -200,13 +234,139 @@ describe('Findings — target filter', () => {
   })
 })
 
+// ── Scanner / tool filter ─────────────────────────────────────────────────────
+
+describe('Findings — scanner filter', () => {
+  beforeEach(() => {
+    vi.mocked(getFindings).mockResolvedValue({ findings: allFindings })
+  })
+
+  it('renders unique scanners in dropdown', async () => {
+    renderFindings()
+    await waitForLoad()
+
+    const scannerSelect = screen.getByDisplayValue(/All Scanners/i)
+    const options = within(scannerSelect as HTMLElement).getAllByRole('option')
+    const labels = options.map((o) => o.textContent)
+
+    expect(labels).toContain('All Scanners')
+    expect(labels).toContain('sqlmap')
+    expect(labels).toContain('zap')
+    expect(labels).toContain('nikto')
+  })
+
+  it('filters findings to one scanner', async () => {
+    const user = userEvent.setup()
+    renderFindings()
+    await waitForLoad()
+
+    const scannerSelect = screen.getByDisplayValue(/All Scanners/i)
+    await user.selectOptions(scannerSelect, 'zap')
+
+    await waitFor(() => {
+      expect(screen.queryByText('SQL Injection in Login')).not.toBeInTheDocument()
+      expect(screen.queryByText('Missing Security Headers')).not.toBeInTheDocument()
+    })
+    expect(screen.getAllByText('Stored XSS in Comments').length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// ── Date range filter ─────────────────────────────────────────────────────────
+
+describe('Findings — date range filter', () => {
+  beforeEach(() => {
+    vi.mocked(getFindings).mockResolvedValue({ findings: allFindings })
+  })
+
+  it('filters out findings before the from-date', async () => {
+    renderFindings()
+    await waitForLoad()
+
+    // Set from-date to May 14 — should exclude the May 13 finding (highFinding)
+    const fromLabel = screen.getByText('From Date')
+    const fromInput = fromLabel.parentElement!.querySelector('input')!
+    fireEvent.change(fromInput, { target: { value: '2026-05-14' } })
+
+    await waitFor(() => {
+      expect(screen.queryByText('Stored XSS in Comments')).not.toBeInTheDocument()
+    })
+    expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('Missing Security Headers').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('filters out findings after the to-date', async () => {
+    renderFindings()
+    await waitForLoad()
+
+    // Set to-date to May 14 — should exclude the May 15 finding (mediumFinding)
+    const toLabel = screen.getByText('To Date')
+    const toInput = toLabel.parentElement!.querySelector('input')!
+    fireEvent.change(toInput, { target: { value: '2026-05-14' } })
+
+    await waitFor(() => {
+      expect(screen.queryByText('Missing Security Headers')).not.toBeInTheDocument()
+    })
+    expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('Stored XSS in Comments').length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('includes findings on the boundary date', async () => {
+    renderFindings()
+    await waitForLoad()
+
+    // Set from=May 14, to=May 14 — should include criticalFinding (discovered May 14)
+    const fromLabel = screen.getByText('From Date')
+    const fromInput = fromLabel.parentElement!.querySelector('input')!
+    const toLabel = screen.getByText('To Date')
+    const toInput = toLabel.parentElement!.querySelector('input')!
+
+    fireEvent.change(fromInput, { target: { value: '2026-05-14' } })
+    fireEvent.change(toInput, { target: { value: '2026-05-14' } })
+
+    await waitFor(() => {
+      expect(screen.queryByText('Stored XSS in Comments')).not.toBeInTheDocument()
+      expect(screen.queryByText('Missing Security Headers')).not.toBeInTheDocument()
+    })
+    expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// ── Reset button ──────────────────────────────────────────────────────────────
+
+describe('Findings — reset filters', () => {
+  beforeEach(() => {
+    vi.mocked(getFindings).mockResolvedValue({ findings: allFindings })
+  })
+
+  it('clears all active filters when reset is clicked', async () => {
+    const user = userEvent.setup()
+    renderFindings()
+    await waitForLoad()
+
+    // Apply a target filter first
+    const targetSelect = screen.getByDisplayValue(/All Targets/i)
+    await user.selectOptions(targetSelect, 'web.example.com')
+
+    await waitFor(() => {
+      expect(screen.queryByText('SQL Injection in Login')).not.toBeInTheDocument()
+    })
+
+    // Now click reset
+    await user.click(screen.getByRole('button', { name: /reset filters/i }))
+
+    await waitFor(() => {
+      expect(screen.getAllByText('SQL Injection in Login').length).toBeGreaterThanOrEqual(1)
+      expect(screen.getAllByText('Stored XSS in Comments').length).toBeGreaterThanOrEqual(1)
+    })
+  })
+})
+
 // ── Empty state ───────────────────────────────────────────────────────────────
 
 describe('Findings — empty state', () => {
   it('shows empty state when no findings exist', async () => {
     vi.mocked(getFindings).mockResolvedValue({ findings: [] })
     renderFindings()
-
     expect(await screen.findByText(/No Findings Match/i)).toBeInTheDocument()
   })
 })
