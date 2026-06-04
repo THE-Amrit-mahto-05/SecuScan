@@ -81,6 +81,23 @@ class TestTasksPagination:
         response = test_client.get(f"/api/v1/tasks?{qs}")
         assert response.status_code == 422
 
+    def test_status_filter_valid(self, test_client):
+        response = test_client.get("/api/v1/tasks?status=completed")
+        assert response.status_code == 200
+
+        data = response.json()
+        assert "tasks" in data
+        assert all(task["status"] == "completed" for task in data["tasks"])
+
+    def test_status_filter_invalid(self, test_client):
+        response = test_client.get("/api/v1/tasks?status=invalid-status")
+        assert response.status_code == 400
+
+        data = response.json()
+        assert data["detail"] == (
+            "Invalid task status 'invalid-status'. Allowed values: queued, running, completed, failed, cancelled"
+        )
+
     def test_first_page_previous_is_null(self, test_client):
         """Test that previous is None on first page"""
         response = test_client.get("/api/v1/tasks?page=1&per_page=10")
@@ -107,7 +124,7 @@ class TestTasksPagination:
     def test_next_url_encodes_filtered_pagination_params(self, test_client):
         """Test that filtered pagination links URL-encode query values."""
         plugin_id = "web scanner/alpha"
-        status = "queued & reviewed"
+        status = "queued"
         asyncio.run(
             _insert_task("encoded-filter-1", plugin_id, status, "2026-06-02T10:00:00")
         )
@@ -129,5 +146,5 @@ class TestTasksPagination:
         next_url = response.json()["pagination"]["next"]
         assert next_url == (
             "/api/v1/tasks?page=2&per_page=1&"
-            "plugin_id=web+scanner%2Falpha&status=queued+%26+reviewed"
+            "plugin_id=web+scanner%2Falpha&status=queued"
         )
